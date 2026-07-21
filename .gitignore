@@ -7,3 +7,6 @@ build/
 .eggs/
 .venv/
 .pixi/
+# pixi environments
+.pixi/*
+!.pixi/config.toml
