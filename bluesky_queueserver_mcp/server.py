@@ -100,7 +100,9 @@ def _validate_api_scopes(api: Any) -> None:
 
     scopes = response.get("scopes")
     if scopes is None:
-        raise RuntimeError(f"Could not determine API scopes from response: {response!r}")
+        raise RuntimeError(
+            f"Could not determine API scopes from response: {response!r}"
+        )
 
     scopes = set(scopes)
     missing = REQUIRED_SCOPES - scopes
@@ -132,8 +134,7 @@ def _build_get_api() -> Callable[[], Any]:
             if not api_key:
                 raise RuntimeError(
                     "QSERVER_HTTP_API_KEY is required. Use a QueueServer API key "
-                    "with exactly these scopes: "
-                    + ", ".join(sorted(REQUIRED_SCOPES))
+                    "with exactly these scopes: " + ", ".join(sorted(REQUIRED_SCOPES))
                 )
 
             from bluesky_queueserver_api.http import REManagerAPI
