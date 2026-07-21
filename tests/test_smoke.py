@@ -1,130 +1,85 @@
-"""Smoke tests for bluesky-queueserver-mcp.
-
-Unit tests verify tool registration without any external services.
-Integration tests start the real ``bluesky-mcp-server`` binary via stdio
-and talk to it using ``fastmcp.Client``.
-
-Integration tests require a running RE Manager and are skipped when it is
-not available (the ``integration`` pytest mark).
-"""
+"""Tests for the restricted QueueServer MCP surface."""
 
 from __future__ import annotations
 
 import asyncio
-import os
 
 import pytest
+from fastmcp import Client
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+from bluesky_queueserver_mcp.server import _build_remote_auth, create_server
+
 
 EXPECTED_TOOLS = {
     "status",
-    "ping",
-    "config_get",
+    "list_plans",
+    "list_devices",
     "queue_get",
-    "queue_start",
-    "queue_stop",
-    "queue_clear",
-    "item_add",
-    "item_get",
-    "item_remove",
-    "environment_open",
-    "environment_close",
-    "re_pause",
-    "re_resume",
-    "re_stop",
-    "history_get",
-    "history_clear",
-    "lock",
-    "unlock",
+    "add_plan_to_queue",
 }
 
 
-def _re_manager_available() -> bool:
-    """Return True if a local RE Manager is responding on the default ZMQ port."""
-    try:
-        from bluesky_queueserver_api.zmq import REManagerAPI
+class FakeAPI:
+    def __init__(self) -> None:
+        self.added_item = None
 
-        api = REManagerAPI(timeout_recv=1.0, timeout_send=1.0)
-        r = api.ping()
-        return bool(r.get("msg"))
-    except Exception:
-        return False
+    def status(self, *, reload: bool) -> dict:
+        return {"success": True, "reload": reload}
 
+    def plans_allowed(self, *, reload: bool) -> dict:
+        return {"success": True, "plans_allowed": {}, "reload": reload}
 
-skip_no_re_manager = pytest.mark.skipif(
-    not _re_manager_available(),
-    reason="RE Manager not running on tcp://localhost:60615",
-)
+    def devices_allowed(self, *, reload: bool) -> dict:
+        return {"success": True, "devices_allowed": {}, "reload": reload}
 
+    def queue_get(self, *, reload: bool) -> dict:
+        return {"success": True, "items": [], "reload": reload}
 
-# ---------------------------------------------------------------------------
-# Unit tests (no external services needed)
-# ---------------------------------------------------------------------------
+    def item_add(self, item: dict) -> dict:
+        self.added_item = item
+        return {"success": True, "item": item}
 
 
-def test_server_creates():
-    """Server can be instantiated with a dummy API factory."""
-    from bluesky_queueserver_mcp.server import create_server
-
-    mcp = create_server(lambda: None)
-    assert mcp is not None
-
-
-def test_expected_tools_registered():
-    """All expected tool names are registered on the server."""
-    from bluesky_queueserver_mcp.server import create_server
-
-    mcp = create_server(lambda: None)
+def test_server_registers_exactly_the_restricted_tools() -> None:
+    mcp = create_server(FakeAPI)
     tools = asyncio.run(mcp.list_tools())
-    registered = {t.name for t in tools}
-    missing = EXPECTED_TOOLS - registered
-    assert not missing, f"Missing tools: {missing}"
+    assert {tool.name for tool in tools} == EXPECTED_TOOLS
 
 
-# ---------------------------------------------------------------------------
-# Integration tests (require a running RE Manager)
-# ---------------------------------------------------------------------------
+async def test_add_plan_only_builds_a_plan_item() -> None:
+    api = FakeAPI()
+    mcp = create_server(lambda: api)
+
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "add_plan_to_queue",
+            {
+                "name": "count",
+                "args": [["det"]],
+                "kwargs": {"num": 5},
+            },
+        )
+
+    assert not result.is_error
+    assert api.added_item == {
+        "item_type": "plan",
+        "name": "count",
+        "args": [["det"]],
+        "kwargs": {"num": 5},
+    }
 
 
-@skip_no_re_manager
-async def test_list_tools_via_stdio():
-    """MCP server starts and lists the expected tools over stdio."""
-    from fastmcp import Client
-    from fastmcp.client.transports import StdioTransport
-
-    transport = StdioTransport(command="bluesky-mcp-server", args=[])
-    async with Client(transport) as client:
-        tools = await client.list_tools()
-        names = {t.name for t in tools}
-        assert EXPECTED_TOOLS.issubset(names)
+def test_remote_auth_requires_a_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("QSERVER_MCP_TOKEN", raising=False)
+    with pytest.raises(RuntimeError, match="QSERVER_MCP_TOKEN is required"):
+        _build_remote_auth()
 
 
-@skip_no_re_manager
-async def test_ping_via_stdio():
-    """Calling the ``ping`` tool returns a dict with a ``msg`` key."""
-    from fastmcp import Client
-    from fastmcp.client.transports import StdioTransport
+async def test_remote_auth_accepts_only_the_configured_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("QSERVER_MCP_TOKEN", "test-token")
+    auth = _build_remote_auth()
 
-    transport = StdioTransport(command="bluesky-mcp-server", args=[])
-    async with Client(transport) as client:
-        result = await client.call_tool("ping")
-        assert not result.is_error
-        data = result.data or result.structured_content or {}
-        assert "msg" in data
-
-
-@skip_no_re_manager
-async def test_status_via_stdio():
-    """Calling the ``status`` tool returns RE Manager state information."""
-    from fastmcp import Client
-    from fastmcp.client.transports import StdioTransport
-
-    transport = StdioTransport(command="bluesky-mcp-server", args=[])
-    async with Client(transport) as client:
-        result = await client.call_tool("status")
-        assert not result.is_error
-        data = result.data or result.structured_content or {}
-        assert "manager_state" in data
+    assert await auth.verify_token("test-token") is not None
+    assert await auth.verify_token("wrong-token") is None

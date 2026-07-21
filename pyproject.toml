@@ -12,18 +12,13 @@ license = { text = "BSD-3-Clause" }
 dependencies = [
     "fastmcp",
     "bluesky-queueserver-api",
-    "openai",
 ]
 
 [project.optional-dependencies]
 test = [
     "pytest",
     "pytest-asyncio",
-    "bluesky-queueserver",
 ]
-
-[project.scripts]
-bluesky-mcp-server = "bluesky_queueserver_mcp.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -31,3 +26,24 @@ include = ["bluesky_queueserver_mcp*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[tool.pixi.dependencies]
+python = ">=3.10"
+
+[tool.pixi.pypi-dependencies]
+bluesky-queueserver-mcp = { path = ".", editable = true }
+
+[tool.pixi.environments]
+default = { solve-group = "default" }
+test = { features = ["test"], solve-group = "default" }
+
+[tool.pixi.tasks]
+serve = "python -m bluesky_queueserver_mcp"
+serve-http = { cmd = "python -m bluesky_queueserver_mcp", env = { QSERVER_MCP_TRANSPORT = "http" } }
+
+[tool.pixi.feature.test.tasks]
+test = "pytest"
