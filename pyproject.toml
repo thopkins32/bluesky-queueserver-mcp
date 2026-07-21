@@ -43,7 +43,6 @@ test = { features = ["test"], solve-group = "default" }
 
 [tool.pixi.tasks]
 serve = "python -m bluesky_queueserver_mcp"
-serve-http = { cmd = "python -m bluesky_queueserver_mcp", env = { QSERVER_MCP_TRANSPORT = "http" } }
 
 [tool.pixi.feature.test.tasks]
 test = "pytest"
