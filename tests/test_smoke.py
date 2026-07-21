@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import asyncio
 
-import pytest
 from fastmcp import Client
 
-from bluesky_queueserver_mcp.server import _build_remote_auth, create_server
+from bluesky_queueserver_mcp.server import REQUIRED_SCOPES, _validate_api_scopes, create_server
 
 
 EXPECTED_TOOLS = {
@@ -20,8 +19,12 @@ EXPECTED_TOOLS = {
 
 
 class FakeAPI:
-    def __init__(self) -> None:
+    def __init__(self, *, scopes: set[str] | None = None) -> None:
         self.added_item = None
+        self.scopes = scopes if scopes is not None else set(REQUIRED_SCOPES)
+
+    def api_scopes(self) -> dict:
+        return {"success": True, "scopes": sorted(self.scopes)}
 
     def status(self, *, reload: bool) -> dict:
         return {"success": True, "reload": reload}
@@ -69,17 +72,25 @@ async def test_add_plan_only_builds_a_plan_item() -> None:
     }
 
 
-def test_remote_auth_requires_a_token(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("QSERVER_MCP_TOKEN", raising=False)
-    with pytest.raises(RuntimeError, match="QSERVER_MCP_TOKEN is required"):
-        _build_remote_auth()
+def test_scope_validation_accepts_exact_scopes() -> None:
+    _validate_api_scopes(FakeAPI())
 
 
-async def test_remote_auth_accepts_only_the_configured_token(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("QSERVER_MCP_TOKEN", "test-token")
-    auth = _build_remote_auth()
+def test_scope_validation_rejects_missing_scopes() -> None:
+    api = FakeAPI(scopes=set(REQUIRED_SCOPES) - {"write:queue:edit"})
+    try:
+        _validate_api_scopes(api)
+    except RuntimeError as exc:
+        assert "missing required scopes" in str(exc)
+    else:
+        raise AssertionError("scope validation should reject missing scopes")
 
-    assert await auth.verify_token("test-token") is not None
-    assert await auth.verify_token("wrong-token") is None
+
+def test_scope_validation_rejects_extra_scopes() -> None:
+    api = FakeAPI(scopes=set(REQUIRED_SCOPES) | {"write:queue:control"})
+    try:
+        _validate_api_scopes(api)
+    except RuntimeError as exc:
+        assert "unexpected extra scopes" in str(exc)
+    else:
+        raise AssertionError("scope validation should reject extra scopes")

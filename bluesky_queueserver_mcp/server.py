@@ -1,4 +1,4 @@
-"""Restricted MCP server for the Bluesky QueueServer HTTP API."""
+"""Restricted local MCP server for the Bluesky QueueServer HTTP API."""
 
 from __future__ import annotations
 
@@ -8,11 +8,20 @@ from collections.abc import Callable
 from typing import Any
 
 from fastmcp import FastMCP
-from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 
 
-def create_server(get_api: Callable[[], Any], *, auth: Any = None) -> FastMCP:
-    """Create an MCP server exposing only observation and plan submission."""
+REQUIRED_SCOPES = frozenset(
+    {
+        "read:status",
+        "read:queue",
+        "read:resources",
+        "write:queue:edit",
+    }
+)
+
+
+def create_server(get_api: Callable[[], Any]) -> FastMCP:
+    """Create a local MCP server exposing only observation and plan submission."""
     mcp = FastMCP(
         name="bluesky-queueserver",
         instructions=(
@@ -20,33 +29,44 @@ def create_server(get_api: Callable[[], Any], *, auth: Any = None) -> FastMCP:
             "QueueServer. Plans may be submitted to the back of the queue, "
             "but the queue and Run Engine cannot otherwise be controlled."
         ),
-        auth=auth,
     )
     api_lock = threading.Lock()
+    scopes_checked = False
+
+    def get_validated_api() -> Any:
+        nonlocal scopes_checked
+        api = get_api()
+        if not scopes_checked:
+            _validate_api_scopes(api)
+            scopes_checked = True
+        return api
+
+    def call_api(operation: Callable[[Any], dict]) -> dict:
+        with api_lock:
+            try:
+                return operation(get_validated_api())
+            except Exception as exc:
+                return {"success": False, "msg": str(exc)}
 
     @mcp.tool()
     def status() -> dict:
         """Return the current RE Manager status."""
-        with api_lock:
-            return get_api().status(reload=True)
+        return call_api(lambda api: api.status(reload=True))
 
     @mcp.tool()
     def list_plans() -> dict:
         """Return allowed plans, including their argument schemas."""
-        with api_lock:
-            return get_api().plans_allowed(reload=True)
+        return call_api(lambda api: api.plans_allowed(reload=True))
 
     @mcp.tool()
     def list_devices() -> dict:
         """Return allowed devices and their properties."""
-        with api_lock:
-            return get_api().devices_allowed(reload=True)
+        return call_api(lambda api: api.devices_allowed(reload=True))
 
     @mcp.tool()
     def queue_get() -> dict:
         """Return queued items and the currently running item."""
-        with api_lock:
-            return get_api().queue_get(reload=True)
+        return call_api(lambda api: api.queue_get(reload=True))
 
     @mcp.tool()
     def add_plan_to_queue(
@@ -67,10 +87,37 @@ def create_server(get_api: Callable[[], Any], *, auth: Any = None) -> FastMCP:
         if kwargs is not None:
             item["kwargs"] = kwargs
 
-        with api_lock:
-            return get_api().item_add(item)
+        return call_api(lambda api: api.item_add(item))
 
     return mcp
+
+
+def _validate_api_scopes(api: Any) -> None:
+    """Refuse QueueServer credentials that are missing or over-scoped."""
+    response = api.api_scopes()
+    if response.get("success") is False:
+        raise RuntimeError(response.get("msg") or "Failed to verify API scopes")
+
+    scopes = response.get("scopes")
+    if scopes is None:
+        raise RuntimeError(
+            f"Could not determine API scopes from response: {response!r}"
+        )
+
+    scopes = set(scopes)
+    missing = REQUIRED_SCOPES - scopes
+    extra = scopes - REQUIRED_SCOPES
+    if missing or extra:
+        details = []
+        if missing:
+            details.append(f"missing required scopes: {sorted(missing)}")
+        if extra:
+            details.append(f"unexpected extra scopes: {sorted(extra)}")
+        raise RuntimeError(
+            "QSERVER_HTTP_API_KEY must be scoped exactly for MCP access ("
+            + "; ".join(details)
+            + ")"
+        )
 
 
 def _build_get_api() -> Callable[[], Any]:
@@ -83,6 +130,13 @@ def _build_get_api() -> Callable[[], Any]:
             if api_cache:
                 return api_cache[0]
 
+            api_key = os.environ.get("QSERVER_HTTP_API_KEY")
+            if not api_key:
+                raise RuntimeError(
+                    "QSERVER_HTTP_API_KEY is required. Use a QueueServer API key "
+                    "with exactly these scopes: " + ", ".join(sorted(REQUIRED_SCOPES))
+                )
+
             from bluesky_queueserver_api.http import REManagerAPI
 
             api = REManagerAPI(
@@ -90,14 +144,12 @@ def _build_get_api() -> Callable[[], Any]:
                     "QSERVER_HTTP_SERVER_URI", "http://localhost:60610"
                 )
             )
-            api_key = os.environ.get("QSERVER_HTTP_API_KEY")
-            if api_key:
-                api.set_authorization_key(api_key=api_key)
+            api.set_authorization_key(api_key=api_key)
 
             user = os.environ.get("QSERVER_USER")
             if user:
                 api.user = user
-            api.user_group = os.environ.get("QSERVER_USER_GROUP", "primary_users")
+            api.user_group = os.environ.get("QSERVER_USER_GROUP", "primary")
 
             api_cache.append(api)
             return api
@@ -105,38 +157,7 @@ def _build_get_api() -> Callable[[], Any]:
     return get_api
 
 
-def _build_remote_auth() -> StaticTokenVerifier:
-    """Create the required bearer-token verifier for remote transport."""
-    token = os.environ.get("QSERVER_MCP_TOKEN")
-    if not token:
-        raise RuntimeError(
-            "QSERVER_MCP_TOKEN is required when QSERVER_MCP_TRANSPORT=http"
-        )
-    return StaticTokenVerifier(
-        tokens={
-            token: {
-                "client_id": "opencode",
-                "scopes": ["queueserver:access"],
-            }
-        },
-        required_scopes=["queueserver:access"],
-    )
-
-
 def main() -> None:
-    """Run the server over stdio or authenticated Streamable HTTP."""
-    transport = os.environ.get("QSERVER_MCP_TRANSPORT", "stdio").lower()
-    if transport not in {"stdio", "http"}:
-        raise RuntimeError("QSERVER_MCP_TRANSPORT must be 'stdio' or 'http'")
-
-    auth = _build_remote_auth() if transport == "http" else None
-    mcp = create_server(_build_get_api(), auth=auth)
-
-    if transport == "http":
-        mcp.run(
-            transport="http",
-            host=os.environ.get("QSERVER_MCP_HOST", "127.0.0.1"),
-            port=int(os.environ.get("QSERVER_MCP_PORT", "8000")),
-        )
-    else:
-        mcp.run(transport="stdio")
+    """Run the local MCP server over stdio."""
+    mcp = create_server(_build_get_api())
+    mcp.run(transport="stdio")

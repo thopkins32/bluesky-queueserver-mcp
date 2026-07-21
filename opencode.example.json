@@ -1,24 +1,15 @@
 {
   "$schema": "https://opencode.ai/config.json",
   "mcp": {
-    "bluesky-queueserver-remote": {
-      "type": "remote",
-      "url": "https://queueserver-mcp.example.org/mcp",
-      "oauth": false,
-      "headers": {
-        "Authorization": "Bearer {env:QSERVER_MCP_TOKEN}"
-      },
-      "enabled": true
-    },
-    "bluesky-queueserver-local-dev": {
+    "bluesky-queueserver": {
       "type": "local",
       "command": ["pixi", "run", "serve"],
       "environment": {
         "QSERVER_HTTP_SERVER_URI": "http://localhost:60610",
         "QSERVER_HTTP_API_KEY": "{env:QSERVER_HTTP_API_KEY}",
-        "QSERVER_USER_GROUP": "primary_users"
+        "QSERVER_USER_GROUP": "primary"
       },
-      "enabled": false
+      "enabled": true
     }
   }
 }
