@@ -6,7 +6,7 @@
       "command": ["pixi", "run", "serve"],
       "environment": {
         "QSERVER_HTTP_SERVER_URI": "http://localhost:60610",
-        "QSERVER_HTTP_API_KEY": "{env:QSERVER_HTTP_API_KEY}",
+        "QSERVER_WRITE_API_KEY": "{env:QSERVER_WRITE_API_KEY}",
         "QSERVER_USER_GROUP": "primary"
       },
       "enabled": true

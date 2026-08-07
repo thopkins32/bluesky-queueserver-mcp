@@ -2,31 +2,27 @@
 
 A deliberately restricted local MCP server for the
 [Bluesky QueueServer](https://github.com/bluesky/bluesky-queueserver) HTTP API.
-It lets an agent observe QueueServer state and submit an allowed plan to the
-back of the queue. It does not expose queue execution, item mutation, Run
-Engine control, worker environment control, scripting, permissions, locks, or
-the underlying `REManagerAPI`.
+It exposes only write operations that add Bluesky plans to the back of the
+queue. Read-only inspection is intentionally handled outside MCP by an OpenCode
+Skill that uses a separate read-only QueueServer API key and the Python
+`REManagerAPI`.
 
 ## Security model
 
-This server is intended to run locally under OpenCode over stdio. It should be
-configured with a **scoped QueueServer API key**, not the broad shared
-single-user key used for normal operations.
+Use two QueueServer API sub-keys for the shared beamline account:
 
-The recommended workflow is:
+| Key | Intended use | Scopes |
+|-----|--------------|--------|
+| `QSERVER_READ_API_KEY` | OpenCode Skill + Python `REManagerAPI` reads | `read:status`, `read:queue`, `read:resources` |
+| `QSERVER_WRITE_API_KEY` | This MCP server only | `write:queue:edit` |
 
-1. Use the existing broad single-user key once to mint a long-lived API sub-key.
-2. Give the sub-key exactly these scopes:
-   `read:status`, `read:queue`, `read:resources`, `write:queue:edit`.
-3. Configure OpenCode to launch this MCP server with that scoped sub-key.
-
-The MCP server verifies the configured key with `api_scopes()` before making any
-QueueServer request. It refuses keys that are missing required scopes or have
-extra scopes. This prevents accidentally running the MCP server with the broad
-shared key.
+Do not give OpenCode the broad shared single-user key. The MCP server verifies
+`QSERVER_WRITE_API_KEY` with `api_scopes()` before making any QueueServer
+request and refuses keys that are missing `write:queue:edit` or have extra
+scopes.
 
 `write:queue:edit` is broader than this MCP server's tool surface: if someone
-bypasses the MCP server and directly uses the scoped key, they may be able to
+bypasses the MCP server and directly uses the write key, they may be able to
 perform other queue-edit operations supported by the httpserver. They still
 should not be able to start the queue, control the Run Engine, run scripts, or
 manage the environment unless additional scopes are granted.
@@ -34,49 +30,65 @@ manage the environment unless additional scopes are granted.
 Operational safety still depends on a human-in-the-loop workflow: keep queue
 autostart off and have a person review and start the queue.
 
-## Tools
+## MCP tools
+
+The MCP server exposes exactly two tools:
 
 | Tool | Capability |
 |------|------------|
-| `status` | Read RE Manager status |
-| `list_plans` | Read allowed plans and argument schemas |
-| `list_devices` | Read allowed devices and properties |
-| `queue_get` | Read queued and currently running items |
 | `add_plan_to_queue` | Add one allowed plan to the back of the queue |
+| `add_plan_batch_to_queue` | Add multiple allowed plans to the back of the queue |
 
-`add_plan_to_queue` accepts only `name`, `args`, and `kwargs`. The agent cannot
-choose queue position, override user identity or group, supply lock keys, start
-execution, reorder items, or remove items through the MCP server.
+Both tools accept only plan-shaped input. The server constructs QueueServer
+items itself with `item_type: "plan"`; raw QueueServer item dictionaries and
+instruction items such as `queue_stop` are not accepted.
+
+There are no MCP read tools and no queue start/stop, remove, move, update,
+clear, environment, Run Engine, scripting, permission, lock, or manager-control
+tools.
 
 ## Configuration
 
 | Environment variable | Default | Description |
 |----------------------|---------|-------------|
 | `QSERVER_HTTP_SERVER_URI` | `http://localhost:60610` | Bluesky HTTP server URI |
-| `QSERVER_HTTP_API_KEY` | required | Scoped QueueServer API key |
+| `QSERVER_WRITE_API_KEY` | required | Scoped QueueServer write key for MCP |
+| `QSERVER_READ_API_KEY` | required for read Skill | Scoped QueueServer read key for Python reads |
 | `QSERVER_USER_GROUP` | `primary` | QueueServer permission group |
 | `QSERVER_USER` | unset | QueueServer user name label |
 
-## Minting the scoped key
+`QSERVER_READ_API_KEY` should be exported in the shell that launches OpenCode so
+the read Skill can use it. `QSERVER_WRITE_API_KEY` is passed to the MCP server in
+the OpenCode MCP configuration.
 
-Using the broad single-user key, request a derived key with the restricted scope
-set. The exact command may vary by deployment, but with `httpie` it looks like:
+## Minting scoped keys
+
+Using the broad single-user key, request derived keys with restricted scopes.
+The exact command may vary by deployment, but with `httpie` it looks like:
 
 ```bash
 http POST http://localhost:60610/api/auth/apikey \
   'Authorization: ApiKey <broad-single-user-key>' \
   expires_in:=31536000 \
-  scopes:='["read:status","read:queue","read:resources","write:queue:edit"]' \
-  note='OpenCode QueueServer MCP scoped key'
+  scopes:='["read:status","read:queue","read:resources"]' \
+  note='OpenCode QueueServer read key'
 ```
 
-`31536000` seconds is about one year. If the key expires, the MCP server will
-simply stop working until a new scoped key is configured.
+```bash
+http POST http://localhost:60610/api/auth/apikey \
+  'Authorization: ApiKey <broad-single-user-key>' \
+  expires_in:=31536000 \
+  scopes:='["write:queue:edit"]' \
+  note='OpenCode QueueServer MCP write key'
+```
+
+`31536000` seconds is about one year. If a key expires, the respective read or
+write operation simply stops working until a new scoped key is configured.
 
 ## OpenCode
 
-See `opencode.example.json` for a local MCP configuration. The key should come
-from the shell environment rather than being committed to a file:
+See `opencode.example.json` for a local MCP configuration. The write key should
+come from the shell environment rather than being committed to a file:
 
 ```json
 {
@@ -87,13 +99,17 @@ from the shell environment rather than being committed to a file:
       "command": ["pixi", "run", "serve"],
       "environment": {
         "QSERVER_HTTP_SERVER_URI": "http://localhost:60610",
-        "QSERVER_HTTP_API_KEY": "{env:QSERVER_HTTP_API_KEY}",
+        "QSERVER_WRITE_API_KEY": "{env:QSERVER_WRITE_API_KEY}",
         "QSERVER_USER_GROUP": "primary"
       }
     }
   }
 }
 ```
+
+The project includes `.opencode/skills/bluesky-queueserver-read/SKILL.md` for
+read-only QueueServer inspection using `QSERVER_READ_API_KEY` and the Python
+`REManagerAPI`. Restart OpenCode after adding or changing Skills or MCP config.
 
 ## Development
 

@@ -1,4 +1,4 @@
-"""Restricted local MCP server for the Bluesky QueueServer HTTP API."""
+"""Write-only local MCP server for the Bluesky QueueServer HTTP API."""
 
 from __future__ import annotations
 
@@ -10,24 +10,18 @@ from typing import Any
 from fastmcp import FastMCP
 
 
-REQUIRED_SCOPES = frozenset(
-    {
-        "read:status",
-        "read:queue",
-        "read:resources",
-        "write:queue:edit",
-    }
-)
+REQUIRED_SCOPES = frozenset({"write:queue:edit"})
 
 
 def create_server(get_api: Callable[[], Any]) -> FastMCP:
-    """Create a local MCP server exposing only observation and plan submission."""
+    """Create a local MCP server exposing only plan submission tools."""
     mcp = FastMCP(
         name="bluesky-queueserver",
         instructions=(
-            "Observe the plans, devices, status, and queue of a Bluesky "
-            "QueueServer. Plans may be submitted to the back of the queue, "
-            "but the queue and Run Engine cannot otherwise be controlled."
+            "Submit Bluesky plans to the back of a QueueServer queue. "
+            "Only plan items can be submitted. Queue execution, queue editing, "
+            "Run Engine control, environment control, scripting, and read-only "
+            "inspection are intentionally not exposed as MCP tools."
         ),
     )
     api_lock = threading.Lock()
@@ -49,26 +43,6 @@ def create_server(get_api: Callable[[], Any]) -> FastMCP:
                 return {"success": False, "msg": str(exc)}
 
     @mcp.tool()
-    def status() -> dict:
-        """Return the current RE Manager status."""
-        return call_api(lambda api: api.status(reload=True))
-
-    @mcp.tool()
-    def list_plans() -> dict:
-        """Return allowed plans, including their argument schemas."""
-        return call_api(lambda api: api.plans_allowed(reload=True))
-
-    @mcp.tool()
-    def list_devices() -> dict:
-        """Return allowed devices and their properties."""
-        return call_api(lambda api: api.devices_allowed(reload=True))
-
-    @mcp.tool()
-    def queue_get() -> dict:
-        """Return queued items and the currently running item."""
-        return call_api(lambda api: api.queue_get(reload=True))
-
-    @mcp.tool()
     def add_plan_to_queue(
         name: str,
         args: list[Any] | None = None,
@@ -81,15 +55,76 @@ def create_server(get_api: Callable[[], Any]) -> FastMCP:
             args: Positional plan arguments.
             kwargs: Keyword plan arguments.
         """
-        item: dict[str, Any] = {"item_type": "plan", "name": name}
-        if args is not None:
-            item["args"] = args
-        if kwargs is not None:
-            item["kwargs"] = kwargs
+        try:
+            item = _build_plan_item(name=name, args=args, kwargs=kwargs)
+        except ValueError as exc:
+            return {"success": False, "msg": str(exc)}
 
         return call_api(lambda api: api.item_add(item))
 
+    @mcp.tool()
+    def add_plan_batch_to_queue(plans: list[dict[str, Any]]) -> dict:
+        """Add multiple allowed plans to the back of the queue without starting it.
+
+        Each plan must be a dict with only these keys: ``name``, ``args``, and
+        ``kwargs``. The server constructs QueueServer plan items and never accepts
+        raw item dictionaries or instruction items.
+        """
+        try:
+            items = _build_plan_batch(plans)
+        except ValueError as exc:
+            return {"success": False, "msg": str(exc)}
+
+        return call_api(lambda api: api.item_add_batch(items))
+
     return mcp
+
+
+def _build_plan_item(
+    *,
+    name: str,
+    args: list[Any] | None = None,
+    kwargs: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build a QueueServer plan item from restricted user input."""
+    if not isinstance(name, str) or not name:
+        raise ValueError("plan name must be a non-empty string")
+    if args is not None and not isinstance(args, list):
+        raise ValueError("args must be a list when provided")
+    if kwargs is not None and not isinstance(kwargs, dict):
+        raise ValueError("kwargs must be a dict when provided")
+
+    item: dict[str, Any] = {"item_type": "plan", "name": name}
+    if args is not None:
+        item["args"] = args
+    if kwargs is not None:
+        item["kwargs"] = kwargs
+    return item
+
+
+def _build_plan_batch(plans: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Build QueueServer plan items from a restricted batch input."""
+    if not isinstance(plans, list) or not plans:
+        raise ValueError("plans must be a non-empty list")
+
+    allowed_keys = {"name", "args", "kwargs"}
+    items = []
+    for index, plan in enumerate(plans):
+        if not isinstance(plan, dict):
+            raise ValueError(f"plans[{index}] must be a dict")
+        unexpected = set(plan) - allowed_keys
+        if unexpected:
+            raise ValueError(
+                f"plans[{index}] contains unsupported keys: {sorted(unexpected)}"
+            )
+        items.append(
+            _build_plan_item(
+                name=plan.get("name"),
+                args=plan.get("args"),
+                kwargs=plan.get("kwargs"),
+            )
+        )
+    return items
 
 
 def _validate_api_scopes(api: Any) -> None:
@@ -100,9 +135,7 @@ def _validate_api_scopes(api: Any) -> None:
 
     scopes = response.get("scopes")
     if scopes is None:
-        raise RuntimeError(
-            f"Could not determine API scopes from response: {response!r}"
-        )
+        raise RuntimeError(f"Could not determine API scopes from response: {response!r}")
 
     scopes = set(scopes)
     missing = REQUIRED_SCOPES - scopes
@@ -114,7 +147,7 @@ def _validate_api_scopes(api: Any) -> None:
         if extra:
             details.append(f"unexpected extra scopes: {sorted(extra)}")
         raise RuntimeError(
-            "QSERVER_HTTP_API_KEY must be scoped exactly for MCP access ("
+            "QSERVER_WRITE_API_KEY must be scoped exactly for MCP write access ("
             + "; ".join(details)
             + ")"
         )
@@ -130,11 +163,11 @@ def _build_get_api() -> Callable[[], Any]:
             if api_cache:
                 return api_cache[0]
 
-            api_key = os.environ.get("QSERVER_HTTP_API_KEY")
+            api_key = os.environ.get("QSERVER_WRITE_API_KEY")
             if not api_key:
                 raise RuntimeError(
-                    "QSERVER_HTTP_API_KEY is required. Use a QueueServer API key "
-                    "with exactly these scopes: " + ", ".join(sorted(REQUIRED_SCOPES))
+                    "QSERVER_WRITE_API_KEY is required. Use a QueueServer API key "
+                    "with exactly this scope: " + ", ".join(sorted(REQUIRED_SCOPES))
                 )
 
             from bluesky_queueserver_api.http import REManagerAPI
