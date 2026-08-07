@@ -111,6 +111,18 @@ The project includes `.opencode/skills/bluesky-queueserver-read/SKILL.md` for
 read-only QueueServer inspection using `QSERVER_READ_API_KEY` and the Python
 `REManagerAPI`. Restart OpenCode after adding or changing Skills or MCP config.
 
+## OpenCode plugin
+
+The project includes `.opencode/plugins/mcp-tool-args-panel.tsx`, an OpenCode
+TUI plugin that displays the arguments of any pending `bluesky-queueserver` MCP
+tool call at the bottom of the terminal while OpenCode is waiting for permission
+to proceed. The panel shows the tool name and the full JSON argument payload,
+scrollable with Page Up / Page Down, and disappears once the permission request
+is answered.
+
+The plugin is auto-loaded from `.opencode/plugins/` — no extra config entry is
+needed.
+
 ## Development
 
 The environment is managed by Pixi through `pyproject.toml`.
