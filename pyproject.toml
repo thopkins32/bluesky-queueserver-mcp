@@ -9,16 +9,10 @@ description = "MCP server for Bluesky Queue Server (bluesky-queueserver)"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "BSD-3-Clause" }
-dependencies = [
-    "fastmcp",
-    "bluesky-queueserver-api",
-]
+dependencies = ["fastmcp", "bluesky-queueserver-api"]
 
 [project.optional-dependencies]
-test = [
-    "pytest",
-    "pytest-asyncio",
-]
+test = ["pytest", "pytest-asyncio", "bluesky-queueserver"]
 
 [tool.setuptools.packages.find]
 where = ["."]
