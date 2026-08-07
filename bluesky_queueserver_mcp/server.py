@@ -5,12 +5,64 @@ from __future__ import annotations
 import os
 import threading
 from collections.abc import Callable
-from typing import Any
+from typing import Annotated, Any
 
 from fastmcp import FastMCP
+from mcp.types import ToolAnnotations
+from pydantic import BaseModel, ConfigDict, Field
 
 
 REQUIRED_SCOPES = frozenset({"write:queue:edit"})
+
+PlanName = Annotated[
+    str,
+    Field(
+        min_length=1,
+        description=(
+            "QueueServer allowed plan name, for example 'count' or 'sleep'. "
+            "This must be a plan from the active QueueServer allowed plans list."
+        ),
+    ),
+]
+PlanArgs = Annotated[
+    list[Any] | None,
+    Field(
+        default=None,
+        description=(
+            "Optional positional arguments passed to the plan exactly as a JSON "
+            "array. Device references and other QueueServer-recognized objects "
+            "must use the same JSON shape accepted by the QueueServer HTTP API."
+        ),
+    ),
+]
+PlanKwargs = Annotated[
+    dict[str, Any] | None,
+    Field(
+        default=None,
+        description=(
+            "Optional keyword arguments passed to the plan exactly as a JSON "
+            'object, for example {"num": 5}.'
+        ),
+    ),
+]
+
+
+class PlanInput(BaseModel):
+    """User-facing plan input accepted by the MCP tools."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: PlanName
+    args: PlanArgs = None
+    kwargs: PlanKwargs = None
+
+
+ADD_PLAN_ANNOTATIONS = ToolAnnotations(
+    readOnlyHint=False,
+    destructiveHint=False,
+    idempotentHint=False,
+    openWorldHint=False,
+)
 
 
 def create_server(get_api: Callable[[], Any]) -> FastMCP:
@@ -42,13 +94,16 @@ def create_server(get_api: Callable[[], Any]) -> FastMCP:
             except Exception as exc:
                 return {"success": False, "msg": str(exc)}
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Add one Bluesky plan to the QueueServer queue",
+        annotations=ADD_PLAN_ANNOTATIONS,
+    )
     def add_plan_to_queue(
-        name: str,
-        args: list[Any] | None = None,
-        kwargs: dict[str, Any] | None = None,
+        name: PlanName,
+        args: PlanArgs = None,
+        kwargs: PlanKwargs = None,
     ) -> dict:
-        """Add one allowed plan to the back of the queue without starting it.
+        """Append one allowed Bluesky plan to the queue without starting execution.
 
         Args:
             name: Name of an allowed plan.
@@ -62,16 +117,31 @@ def create_server(get_api: Callable[[], Any]) -> FastMCP:
 
         return call_api(lambda api: api.item_add(item))
 
-    @mcp.tool()
-    def add_plan_batch_to_queue(plans: list[dict[str, Any]]) -> dict:
-        """Add multiple allowed plans to the back of the queue without starting it.
+    @mcp.tool(
+        title="Add multiple Bluesky plans to the QueueServer queue",
+        annotations=ADD_PLAN_ANNOTATIONS,
+    )
+    def add_plan_batch_to_queue(
+        plans: Annotated[
+            list[PlanInput],
+            Field(
+                min_length=1,
+                description=(
+                    "Non-empty list of plan-shaped inputs to append in order. Each "
+                    "entry accepts only name, args, and kwargs; raw QueueServer item "
+                    "dictionaries and instruction items are rejected."
+                ),
+            ),
+        ],
+    ) -> dict:
+        """Append multiple allowed Bluesky plans to the queue without starting execution.
 
         Each plan must be a dict with only these keys: ``name``, ``args``, and
         ``kwargs``. The server constructs QueueServer plan items and never accepts
         raw item dictionaries or instruction items.
         """
         try:
-            items = _build_plan_batch(plans)
+            items = _build_plan_batch([plan.model_dump() for plan in plans])
         except ValueError as exc:
             return {"success": False, "msg": str(exc)}
 
@@ -135,7 +205,9 @@ def _validate_api_scopes(api: Any) -> None:
 
     scopes = response.get("scopes")
     if scopes is None:
-        raise RuntimeError(f"Could not determine API scopes from response: {response!r}")
+        raise RuntimeError(
+            f"Could not determine API scopes from response: {response!r}"
+        )
 
     scopes = set(scopes)
     missing = REQUIRED_SCOPES - scopes
@@ -146,11 +218,11 @@ def _validate_api_scopes(api: Any) -> None:
             details.append(f"missing required scopes: {sorted(missing)}")
         if extra:
             details.append(f"unexpected extra scopes: {sorted(extra)}")
-        raise RuntimeError(
-            "QSERVER_WRITE_API_KEY must be scoped exactly for MCP write access ("
-            + "; ".join(details)
-            + ")"
-        )
+            raise RuntimeError(
+                "QSERVER_WRITE_API_KEY must be scoped exactly for MCP write access ("
+                + "; ".join(details)
+                + ")"
+            )
 
 
 def _build_get_api() -> Callable[[], Any]:

@@ -44,6 +44,42 @@ def test_server_registers_exactly_the_write_tools() -> None:
     assert {tool.name for tool in tools} == EXPECTED_TOOLS
 
 
+def test_tools_publish_rich_argument_metadata() -> None:
+    mcp = create_server(FakeAPI)
+    tools = {
+        tool.name: tool.to_mcp_tool().model_dump(mode="json", exclude_none=True)
+        for tool in asyncio.run(mcp.list_tools())
+    }
+
+    add_plan = tools["add_plan_to_queue"]
+    assert add_plan["title"] == "Add one Bluesky plan to the QueueServer queue"
+    assert add_plan["annotations"] == {
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": False,
+    }
+    assert add_plan["inputSchema"]["properties"]["name"] == {
+        "description": (
+            "QueueServer allowed plan name, for example 'count' or 'sleep'. "
+            "This must be a plan from the active QueueServer allowed plans list."
+        ),
+        "minLength": 1,
+        "type": "string",
+    }
+    assert "description" in add_plan["inputSchema"]["properties"]["args"]
+    assert "description" in add_plan["inputSchema"]["properties"]["kwargs"]
+
+    batch_plans = tools["add_plan_batch_to_queue"]["inputSchema"]["properties"][
+        "plans"
+    ]
+    assert batch_plans["minItems"] == 1
+    assert "raw QueueServer item dictionaries" in batch_plans["description"]
+    assert batch_plans["items"]["additionalProperties"] is False
+    assert batch_plans["items"]["required"] == ["name"]
+    assert "description" in batch_plans["items"]["properties"]["name"]
+
+
 async def test_add_plan_only_builds_a_plan_item() -> None:
     api = FakeAPI()
     mcp = create_server(lambda: api)
